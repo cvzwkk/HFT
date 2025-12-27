@@ -40,10 +40,10 @@ def index(subpath: str = "", edit: str = None):
         full_p = os.path.join(BASE_DIR, rel_path)
         
         if os.path.isdir(full_p):
-            links.append(f'<li>📁 <a href="/browse/{rel_path}">{f}/</a></li>')
+            links.append(f'<li>ðŸ“ <a href="/browse/{rel_path}">{f}/</a></li>')
         else:
             links.append(
-                f'<li>📄 <a href="/download/{rel_path}">{f}</a> '
+                f'<li>ðŸ“„ <a href="/download/{rel_path}">{f}</a> '
                 f'[<a href="/browse/{subpath}?edit={rel_path}" style="color:orange;">Edit</a>]</li>'
             )
 
@@ -71,4 +71,73 @@ def index(subpath: str = "", edit: str = None):
                     <h3>Editing: {edit}</h3>
                     <form action="/save" method="post">
                         <input type="hidden" name="filepath" value="{edit}">
-                        <textarea name="content" style="width: 100%; height: 300px; font-family: monospace; background: #222; color: #0f0; padding: 10px; border: 1px solid #555;">{content}
+                        <textarea name="content" style="width: 100%; height: 300px; font-family: monospace; background: #222; color: #0f0; padding: 10px; border: 1px solid #555;">{content}</textarea>
+                        <br><br>
+                        <button type="submit" style="background: #28a745; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer;">Save Changes</button>
+                        <a href="/browse/{subpath}" style="color: #ccc; margin-left: 15px;">Cancel</a>
+                    </form>
+                </div>
+                """
+            except Exception as e:
+                editor_html = f"<p style='color:red;'>Error reading file: {e}</p>"
+
+    html_content = f"""
+    <html>
+        <head><title>File Server</title></head>
+        <body style="font-family: sans-serif; padding: 20px;">
+            <h2>Directory: / {subpath}</h2>
+            <ul>{''.join(links)}</ul>
+            <hr>
+            {create_form}
+            {editor_html}
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+# -------------------------
+# FILE ACTIONS
+# -------------------------
+
+@app.post("/create")
+def create_file(subpath: str = Form(""), filename: str = Form(...)):
+    """Creates a new empty file in the current subpath."""
+    # Prevent directory traversal for safety
+    clean_filename = os.path.basename(filename)
+    full_path = os.path.join(BASE_DIR, subpath, clean_filename)
+    
+    if os.path.exists(full_path):
+        raise HTTPException(status_code=400, detail="File already exists")
+    
+    try:
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write("") # Create empty file
+        return RedirectResponse(url=f"/browse/{subpath}?edit={os.path.join(subpath, clean_filename)}", status_code=303)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/save")
+def save_file(filepath: str = Form(...), content: str = Form(...)):
+    full_path = os.path.join(BASE_DIR, filepath)
+    try:
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        parent_path = os.path.dirname(filepath)
+        return RedirectResponse(url=f"/browse/{parent_path}", status_code=303)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/download/{filepath:path}")
+def download_file(filepath: str):
+    full_path = os.path.join(BASE_DIR, filepath)
+    if os.path.exists(full_path) and os.path.isfile(full_path):
+        return FileResponse(full_path)
+    raise HTTPException(status_code=404, detail="File not found")
+
+# -------------------------
+# SERVER START
+# -------------------------
+if __name__ == "__main__":
+    public_url = ngrok.connect(PORT).public_url
+    print(f" * Public URL: {public_url}")
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
