@@ -5,6 +5,7 @@ import websockets
 import nest_asyncio
 import threading
 import sys
+import os
 from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pyngrok import ngrok
@@ -13,7 +14,8 @@ from pyngrok import ngrok
 NGROK_TOKEN = "36xkALQDnxGLwLU3o1CIo2SKsvt_7cUEHiQnMbNC2Snv5bfKk"
 SYMBOL = "tBTCUSD"
 INITIAL_BALANCE = 100000.0
-TRADE_AMOUNT_USD = 500.0  # Constant USD amount per trade entry
+TRADE_AMOUNT_USD = 500.0
+STATE_FILE = "bot_state.json"
 
 bot = None
 
@@ -76,6 +78,32 @@ class HFTPaperBot:
         self.history = deque(maxlen=30)
         self.order_book = {'bids': {}, 'asks': {}}
         self.last_trade_time = 0
+        self.load_state()
+
+    def save_state(self):
+        """Saves current bot state to a JSON file."""
+        state = {
+            'balance': self.balance,
+            'pnl': self.pnl,
+            'open_trades': self.open_trades,
+            'history': list(self.history)
+        }
+        with open(STATE_FILE, 'w') as f:
+            json.dump(state, f)
+
+    def load_state(self):
+        """Loads bot state from JSON file if it exists."""
+        if os.path.exists(STATE_FILE):
+            try:
+                with open(STATE_FILE, 'r') as f:
+                    state = json.load(f)
+                    self.balance = state.get('balance', INITIAL_BALANCE)
+                    self.pnl = state.get('pnl', 0.0)
+                    self.open_trades = state.get('open_trades', [])
+                    self.history = deque(state.get('history', []), maxlen=30)
+                print(f"[SYSTEM] State loaded: Bal ${self.balance:,.2f}")
+            except Exception as e:
+                print(f"[ERROR] Could not load state: {e}")
 
     async def tick(self):
         best_bid = max(self.order_book['bids'].keys()) if self.order_book['bids'] else None
@@ -85,6 +113,7 @@ class HFTPaperBot:
         now, mid = time.time(), (best_bid + best_ask) / 2
         
         # Check Exits
+        changed = False
         for t in self.open_trades[:]:
             closed = False
             reason = ""
@@ -99,17 +128,17 @@ class HFTPaperBot:
                 diff = (mid - t['entry']) * t['qty'] if t['side'] == 'BUY' else (t['entry'] - mid) * t['qty']
                 self.pnl += diff
                 self.balance += diff
-                # Log detailed Exit Info
                 self.history.append(
                     f"[{reason}] {t['side']} {t['qty']:.4f} | Entry: {t['entry']:.1f} | Exit: {mid:.1f} | PnL: {diff:.2f}"
                 )
                 self.open_trades.remove(t)
+                changed = True
 
         # Execute Entry
         if now - self.last_trade_time >= 0.05 and len(self.open_trades) < 20:
             side = 'BUY' if len([x for x in self.open_trades if x['side']=='BUY']) < 10 else 'SELL'
             price = best_bid if side == 'BUY' else best_ask
-            qty = TRADE_AMOUNT_USD / price # Amount used logic
+            qty = TRADE_AMOUNT_USD / price 
             
             self.open_trades.append({
                 'side': side, 
@@ -121,6 +150,10 @@ class HFTPaperBot:
                 'open_time': now
             })
             self.last_trade_time = now
+            changed = True
+        
+        if changed:
+            self.save_state()
 
 async def run_app():
     global bot
@@ -149,8 +182,11 @@ async def run_app():
                         await bot.tick()
                         sys.stdout.write(f"\rBAL: ${bot.balance:,.2f} | PNL: ${bot.pnl:,.2f}   ")
                         sys.stdout.flush()
-            except: continue
+            except Exception: continue
 
 if __name__ == "__main__":
     nest_asyncio.apply()
-    asyncio.run(run_app())
+    try:
+        asyncio.run(run_app())
+    except KeyboardInterrupt:
+        print("\n[SYSTEM] Stopping bot...")
