@@ -131,8 +131,8 @@ class HFTPaperBot:
 
         # Execute Entry (0.1s delay between trades)
         if now - self.last_trade_time >= 0.1 and len(self.open_trades) < 15:
-            side = 'BUY' if len([x for x in self.open_trades if x['side']=='BUY']) < 7 else 'SELL'
-            price = best_bid if side == 'BUY' else best_ask
+            side = 'SELL' if len([x for x in self.open_trades if x['side']=='BUY']) < 7 else 'SELL'
+            price = best_bid if side == 'SELL' else best_bid
             qty = TRADE_AMOUNT_USD / price 
             
             self.open_trades.append({
