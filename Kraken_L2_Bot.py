@@ -171,17 +171,17 @@ class HFTPaperBot:
 
         # 2. Manage Entries with Volume Check
         if now - self.last_trade_time >= 0.5 and len(self.open_trades) < 6:
-            side = 'SELL' if len([x for x in self.open_trades if x['side']=='BUY']) <= len([x for x in self.open_trades if x['side']=='SELL']) else 'SELL'
+            side = 'BUY' if len([x for x in self.open_trades if x['side']=='BUY']) <= len([x for x in self.open_trades if x['side']=='SELL']) else 'SELL'
             target_q = best_ask_q if side == 'SE' else best_bid_q
             
             if target_q >= MIN_LIQUIDITY_QTY:
-                entry_price = best_ask_p if side == 'SELL' else best_ask_p
+                entry_price = best_ask_p if side == 'BUY' else best_bid_p
                 qty = TRADE_AMOUNT_USD / entry_price
                 
                 self.open_trades.append({
                     'side': side, 'entry': entry_price, 'qty': qty,
-                    'sl': entry_price - 10 if side == 'SELL' else entry_price + 10,
-                    'tp': entry_price + 15 if side == 'SELL' else entry_price - 15,
+                    'sl': entry_price - 10 if side == 'BUY' else entry_price + 10,
+                    'tp': entry_price + 15 if side == 'BUY' else entry_price - 15,
                     'open_time': now
                 })
                 self.last_trade_time = now
