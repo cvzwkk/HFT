@@ -1,4 +1,3 @@
-
 import asyncio
 import json
 import time
@@ -13,7 +12,7 @@ from pyngrok import ngrok
 
 # --- CONFIGURATION ---
 NGROK_TOKEN = "37f0PzWHf04nv1Q4R0mqNso4tRx_2u1vSxmsUCRvHDR1fGa4"
-SYMBOL = "BTC/USD" # Kraken V2 format
+SYMBOL = "BTC/USD" 
 INITIAL_BALANCE = 100000.0
 TRADE_AMOUNT_USD = 50.0
 STATE_FILE = "bot_state_kraken.json"
@@ -32,7 +31,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             for t in bot.open_trades
         ])
 
-        history_list = "".join([f"<li>{log}</li>" for log in list(bot.history)[-15:]])
+        history_list = "".join([f"<li>{log}</li>" for log in list(bot.history)[-10:]])
+
+        # --- L2 ORDERBOOK LOGIC ---
+        # Get top 10 Asks (sorted ascending) and Bids (sorted descending)
+        sorted_asks = sorted(bot.order_book['asks'].items())[:10][::-1] # Reverse for top-down view
+        sorted_bids = sorted(bot.order_book['bids'].items(), reverse=True)[:10]
+
+        asks_html = "".join([f"<tr class='ask'><td>ASK</td><td>{p:.1f}</td><td>{q:.4f}</td></tr>" for p, q in sorted_asks])
+        bids_html = "".join([f"<tr class='bid'><td>BID</td><td>{p:.1f}</td><td>{q:.4f}</td></tr>" for p, q in sorted_bids])
 
         html = f"""
         <!DOCTYPE html>
@@ -44,26 +51,47 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 body {{ font-family: 'Segoe UI', sans-serif; background: #06080a; color: #eaecef; padding: 20px; }}
                 .stat-container {{ display: flex; gap: 15px; margin-bottom: 20px; }}
                 .stat-box {{ background: #111417; padding: 15px; border-radius: 10px; border: 1px solid #23282d; flex: 1; }}
-                table {{ width: 100%; border-collapse: collapse; background: #111417; border-radius: 8px; overflow: hidden; }}
-                th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #23282d; }}
-                th {{ background: #1e2329; color: #848e9c; font-size: 12px; }}
+                table {{ width: 100%; border-collapse: collapse; background: #111417; border-radius: 8px; overflow: hidden; margin-bottom: 20px; }}
+                th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #23282d; font-size: 13px; }}
+                th {{ background: #1e2329; color: #848e9c; font-size: 11px; text-transform: uppercase; }}
                 .pnl-pos {{ color: #05ca7e; }} .pnl-neg {{ color: #e02424; }}
+                .ask {{ color: #ff4d4d; }} .bid {{ color: #05ca7e; }}
+                .ob-container {{ display: grid; grid-template-columns: 1fr; gap: 10px; }}
             </style>
         </head>
         <body>
             <h2 style="color:#05ca7e;">⚡ Kraken HFT Bot Live: {SYMBOL}</h2>
+            
             <div class="stat-container">
                 <div class="stat-box">Balance: <strong>${bot.balance:,.2f}</strong></div>
                 <div class="stat-box">PnL: <span class="{'pnl-pos' if bot.pnl >= 0 else 'pnl-neg'}">${bot.pnl:,.2f}</span></div>
                 <div class="stat-box">Active Trades: <strong>{len(bot.open_trades)}</strong></div>
             </div>
+
             <h3>Active Positions</h3>
             <table>
                 <thead><tr><th>Side</th><th>Entry</th><th>Qty</th><th>Value</th><th>SL</th><th>TP</th><th>Age</th></tr></thead>
                 <tbody>{trades_rows}</tbody>
             </table>
+
             <h3>Recent History</h3>
-            <ul style="font-family: monospace; font-size: 13px; color: #848e9c;">{history_list}</ul>
+            <ul style="font-family: monospace; font-size: 12px; color: #848e9c; background: #111417; padding: 15px; border-radius: 8px; list-style: none; border: 1px solid #23282d;">
+                {history_list if history_list else "<li>Waiting for trades...</li>"}
+            </ul>
+
+            <h3>Orderbook L2 (Depth)</h3>
+            <div class="ob-container">
+                <table>
+                    <thead><tr><th>Type</th><th>Price (USD)</th><th>Quantity</th></tr></thead>
+                    <tbody>
+                        {asks_html}
+                        <tr style="background: #1e2329; font-weight: bold; text-align: center;">
+                            <td colspan="3" style="text-align: center; color: #848e9c;">MID MARKET</td>
+                        </tr>
+                        {bids_html}
+                    </tbody>
+                </table>
+            </div>
         </body>
         </html>
         """
@@ -103,9 +131,10 @@ class HFTPaperBot:
             except: pass
 
     async def tick(self):
-        best_bid = max(self.order_book['bids'].keys()) if self.order_book['bids'] else None
-        best_ask = min(self.order_book['asks'].keys()) if self.order_book['asks'] else None
-        if not best_bid or not best_ask: return
+        if not self.order_book['bids'] or not self.order_book['asks']: return
+        
+        best_bid = max(self.order_book['bids'].keys())
+        best_ask = min(self.order_book['asks'].keys())
         
         now, mid = time.time(), (best_bid + best_ask) / 2
         
@@ -114,7 +143,7 @@ class HFTPaperBot:
         for t in self.open_trades[:]:
             closed = False
             reason = ""
-            if now - t['open_time'] >= 1.5: # Slightly longer TTL for Kraken
+            if now - t['open_time'] >= 1.5:
                 closed, reason = True, "TIME"
             elif t['side'] == 'BUY' and (mid <= t['sl'] or mid >= t['tp']): 
                 closed, reason = True, "SL/TP"
@@ -129,16 +158,18 @@ class HFTPaperBot:
                 self.open_trades.remove(t)
                 changed = True
 
-        # Execute Entry (0.1s delay between trades)
+        # Execute Entry
         if now - self.last_trade_time >= 0.1 and len(self.open_trades) < 15:
-            side = 'SELL' if len([x for x in self.open_trades if x['side']=='BUY']) < 7 else 'SELL'
-            price = best_bid if side == 'SELL' else best_bid
+            side = 'BUY' if len([x for x in self.open_trades if x['side']=='BUY']) < 7 else 'SELL'
+            price = best_ask if side == 'BUY' else best_bid
             qty = TRADE_AMOUNT_USD / price 
             
             self.open_trades.append({
                 'side': side, 'entry': price, 'qty': qty, 
                 'usd_value': TRADE_AMOUNT_USD,
-                'sl': price-10, 'tp': price+15, 'open_time': now
+                'sl': price-10 if side == 'BUY' else price+10, 
+                'tp': price+15 if side == 'BUY' else price-15, 
+                'open_time': now
             })
             self.last_trade_time = now
             changed = True
@@ -157,7 +188,6 @@ async def run_app():
     print(f"\n[SYSTEM] Dashboard: {public_url}")
 
     async with websockets.connect("wss://ws.kraken.com/v2") as ws:
-        # Kraken V2 Subscribe to Book (depth 10 is enough for HFT mid-price)
         sub_msg = {
             "method": "subscribe",
             "params": {
@@ -174,22 +204,21 @@ async def run_app():
                 data = json.loads(msg)
                 
                 if data.get("channel") == "book" and "data" in data:
-                    # Update order book from Kraken V2 Snapshot/Update
                     for update in data["data"]:
                         for b in update.get("bids", []):
-                            price, qty = b["price"], b["qty"]
-                            if qty > 0: bot.order_book['bids'][price] = qty
-                            else: bot.order_book['bids'].pop(price, None)
+                            p, q = b["price"], b["qty"]
+                            if q > 0: bot.order_book['bids'][p] = q
+                            else: bot.order_book['bids'].pop(p, None)
                         
                         for a in update.get("asks", []):
-                            price, qty = a["price"], a["qty"]
-                            if qty > 0: bot.order_book['asks'][price] = qty
-                            else: bot.order_book['asks'].pop(price, None)
+                            p, q = a["price"], a["qty"]
+                            if q > 0: bot.order_book['asks'][p] = q
+                            else: bot.order_book['asks'].pop(p, None)
                     
                     await bot.tick()
                     sys.stdout.write(f"\rKRAKEN BAL: ${bot.balance:,.2f} | PNL: ${bot.pnl:,.2f}   ")
                     sys.stdout.flush()
-            except Exception as e:
+            except Exception:
                 continue
 
 if __name__ == "__main__":
