@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pyngrok import ngrok
 
 # --- CONFIGURATION ---
-NGROK_TOKEN = "36xkALQDnxGLwLU3o1CIo2SKsvt_7cUEHiQnMbNC2Snv5bfKk"
+NGROK_TOKEN = "37f0PzWHf04nv1Q4R0mqNso4tRx_2u1vSxmsUCRvHDR1fGa4"
 SYMBOL = "BTC/USD" # Kraken V2 format
 INITIAL_BALANCE = 100000.0
 TRADE_AMOUNT_USD = 500.0
