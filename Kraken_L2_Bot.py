@@ -171,17 +171,17 @@ class HFTPaperBot:
 
         # 2. Manage Entries with Volume Check
         if now - self.last_trade_time >= 0.5 and len(self.open_trades) < 6:
-            side = 'BUY' if len([x for x in self.open_trades if x['side']=='BUY']) <= len([x for x in self.open_trades if x['side']=='SELL']) else 'SELL'
-            target_q = best_ask_q if side == 'BUY' else best_bid_q
+            side = 'SELL' if len([x for x in self.open_trades if x['side']=='BUY']) <= len([x for x in self.open_trades if x['side']=='SELL']) else 'SELL'
+            target_q = best_ask_q if side == 'SE' else best_bid_q
             
             if target_q >= MIN_LIQUIDITY_QTY:
-                entry_price = best_ask_p if side == 'BUY' else best_bid_p
+                entry_price = best_ask_p if side == 'SELL' else best_ask_p
                 qty = TRADE_AMOUNT_USD / entry_price
                 
                 self.open_trades.append({
                     'side': side, 'entry': entry_price, 'qty': qty,
-                    'sl': entry_price - 10 if side == 'BUY' else entry_price + 10,
-                    'tp': entry_price + 15 if side == 'BUY' else entry_price - 15,
+                    'sl': entry_price - 10 if side == 'SELL' else entry_price + 10,
+                    'tp': entry_price + 15 if side == 'SELL' else entry_price - 15,
                     'open_time': now
                 })
                 self.last_trade_time = now
@@ -193,9 +193,9 @@ async def run_app():
     global bot
     bot = HFTPaperBot()
     ngrok.set_auth_token(NGROK_TOKEN)
-    public_url = ngrok.connect(5060).public_url
+    public_url = ngrok.connect(5062).public_url
     
-    server = HTTPServer(('0.0.0.0', 5060), DashboardHandler)
+    server = HTTPServer(('0.0.0.0', 5062), DashboardHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"\n[SYSTEM] BOT ACTIVE. URL: {public_url}")
 
