@@ -15,7 +15,7 @@ from pyngrok import ngrok
 NGROK_TOKEN = "37f0PzWHf04nv1Q4R0mqNso4tRx_2u1vSxmsUCRvHDR1fGa4"
 SYMBOL = "BTC/USD" # Kraken V2 format
 INITIAL_BALANCE = 100000.0
-TRADE_AMOUNT_USD = 500.0
+TRADE_AMOUNT_USD = 50.0
 STATE_FILE = "bot_state_kraken.json"
 
 bot = None
