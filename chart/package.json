@@ -1,0 +1,24 @@
+{
+  "name": "btc-live-chart",
+  "version": "1.0.0",
+  "description": "Trading chart using Vue 2 and TradingVue.js",
+  "main": "vite.config.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@ngrok/ngrok": "^1.7.0",
+    "trading-vue-js": "^1.0.2",
+    "vue": "^2.7.14",
+    "vue-template-compiler": "^2.7.14"
+  },
+  "devDependencies": {
+    "vite": "^4.4.5",
+    "vite-plugin-vue2": "^2.0.3"
+  }
+}
