@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+import random
 from datetime import datetime, timezone
 from collections import deque
 from threading import Thread
@@ -9,6 +10,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import websockets
 from pyngrok import ngrok, conf
 import nest_asyncio
+import time
 
 # =========================
 # CONFIG
@@ -24,6 +26,11 @@ MAX_INVENTORY = 0.05
 FEE = 0.0004
 IMBALANCE_THRESHOLD = 0.2
 TRADE_HISTORY_LIMIT = 25
+IGNORE_INITIAL_TRADES = 24
+TRAILING_PERCENT = 0.1 / 100  # 0.1%
+
+MIN_SLIPPAGE = -0.0005
+MAX_SLIPPAGE = 0.0005
 
 # =========================
 # AUTENTICA NGROK
@@ -38,12 +45,17 @@ inventory = 0.0
 realized_pnl = 0.0
 trade_history = deque(maxlen=TRADE_HISTORY_LIMIT)
 total_trades = 0
+processed_trades = 0
 
-bid_levels = {}
+bid_levels = {}  # {price: qty}
 ask_levels = {}
 best_bid = 0.0
 best_ask = 0.0
 html_content = ""
+
+# Controle de trailing stop/profit
+trailing_stop = None
+trailing_profit = None
 
 # =========================
 # UTILITIES
@@ -58,66 +70,122 @@ def orderbook_imbalance():
         return 0
     return (bid_vol - ask_vol) / (bid_vol + ask_vol)
 
-def execute_order(side, price, qty):
-    """Executa a ordem e registra entry e exit price"""
-    global balance, inventory, realized_pnl, trade_history, total_trades
+def fill_from_book(levels, qty_needed, is_bid=True):
+    """
+    Executa fills reais do book com slippage e partial fills
+    """
+    fills = []
+    sorted_prices = sorted(levels.keys(), reverse=is_bid)
+    for price in sorted_prices:
+        available = levels[price]
+        fill_qty = min(qty_needed, available)
+        # aplica slippage aleatório
+        slippage = random.uniform(MIN_SLIPPAGE, MAX_SLIPPAGE)
+        fill_price = price * (1 + slippage)
+        fills.append((fill_price, fill_qty))
+        levels[price] -= fill_qty
+        if levels[price] <= 1e-12:
+            del levels[price]
+        qty_needed -= fill_qty
+        if qty_needed <= 0:
+            break
+    return fills
+
+def calculate_unrealized_pnl():
+    global inventory
+    mid = mid_price()
+    return (inventory * mid) if inventory else 0
+
+def execute_order_real(side, qty):
+    global balance, inventory, realized_pnl, trade_history, total_trades, processed_trades, trailing_stop, trailing_profit
     now = datetime.now(timezone.utc).isoformat()
     total_trades += 1
 
+    if processed_trades < IGNORE_INITIAL_TRADES:
+        processed_trades += 1
+        return
+
+    # Adiciona latência aleatória
+    time.sleep(random.uniform(0.05, 0.2))  # 50-200ms
+
+    fills = []
     if side == "BUY":
-        cost = qty * price
-        fee = cost * FEE
-        balance -= cost + fee
+        if not ask_levels or qty <= 0:
+            return
+        fills = fill_from_book(ask_levels, qty, is_bid=False)
+        total_cost = sum(p*q for p,q in fills)
+        total_fee = total_cost * FEE
+        balance -= total_cost + total_fee
         inventory += qty
-        trade_history.append({
+        trailing_stop = min(p for p,_ in fills) * (1 - TRAILING_PERCENT)
+        trailing_profit = max(p for p,_ in fills) * (1 + TRAILING_PERCENT)
+        trade = {
             "side": "BUY",
-            "entry_price": price,
+            "entry_price": sum(p*q for p,q in fills)/qty,
             "exit_price": None,
             "qty": qty,
             "pnl": 0,
             "time": now
-        })
-    elif side == "SELL":
-        proceeds = qty * price
-        fee = proceeds * FEE
-        balance += proceeds - fee
-        inventory -= qty
-        pnl = proceeds - fee
-        realized_pnl += pnl
+        }
+        trade_history.append(trade)
 
-        # Atualiza último BUY se existir para registrar exit_price
-        updated = False
+    elif side == "SELL":
+        if not bid_levels or qty <= 0:
+            return
+        fills = fill_from_book(bid_levels, qty, is_bid=True)
+        total_proceeds = sum(p*q for p,q in fills)
+        total_fee = total_proceeds * FEE
+        balance += total_proceeds - total_fee
+        inventory -= qty
+        trailing_stop = max(p for p,_ in fills) * (1 + TRAILING_PERCENT)
+        trailing_profit = min(p for p,_ in fills) * (1 - TRAILING_PERCENT)
+
+        pnl = 0
+        # Atualiza último BUY para exit_price real
         for t in reversed(trade_history):
             if t["side"] == "BUY" and t["exit_price"] is None:
-                t["exit_price"] = price
+                exit_price = sum(p*q for p,q in fills)/qty
+                pnl = (exit_price - t["entry_price"]) * qty
+                t["exit_price"] = exit_price
                 t["pnl"] = pnl
-                updated = True
+                realized_pnl += pnl
                 break
-        if not updated:
-            # Nenhum PnL registrado, aplica perda simulada (ex: 0.1% do balance)
-            loss = balance * 0.001
-            balance -= loss
 
-        trade_history.append({
+        trade = {
             "side": "SELL",
             "entry_price": None,
-            "exit_price": price,
+            "exit_price": sum(p*q for p,q in fills)/qty,
             "qty": qty,
-            "pnl": pnl if updated else -loss,
+            "pnl": pnl,
             "time": now
-        })
+        }
+        trade_history.append(trade)
+
+def check_trailing(price):
+    global trailing_stop, trailing_profit
+    if trailing_stop and price <= trailing_stop:
+        execute_order_real("SELL", ORDER_SIZE)
+        trailing_stop = None
+        trailing_profit = None
+    if trailing_profit and price >= trailing_profit:
+        execute_order_real("SELL", ORDER_SIZE)
+        trailing_stop = None
+        trailing_profit = None
 
 def check_book_and_trade():
-    mid = mid_price()
     imbalance = orderbook_imbalance()
-    if imbalance > IMBALANCE_THRESHOLD and inventory + ORDER_SIZE <= MAX_INVENTORY:
-        execute_order("BUY", best_bid, ORDER_SIZE)
-    if imbalance < -IMBALANCE_THRESHOLD and inventory - ORDER_SIZE >= -MAX_INVENTORY:
-        execute_order("SELL", best_ask, ORDER_SIZE)
+    mid = mid_price()
+    # filtro de picos/extremos do book
+    if imbalance > IMBALANCE_THRESHOLD and inventory + ORDER_SIZE <= MAX_INVENTORY and best_ask <= mid * 1.001:
+        execute_order_real("BUY", ORDER_SIZE)
+    if imbalance < -IMBALANCE_THRESHOLD and inventory - ORDER_SIZE >= -MAX_INVENTORY and best_bid >= mid * 0.999:
+        execute_order_real("SELL", ORDER_SIZE)
+    check_trailing(mid)
 
 def generate_html():
     global html_content
     mid = mid_price()
+    unrealized_pnl = calculate_unrealized_pnl()
     html = f"""
     <html>
     <head>
@@ -131,7 +199,7 @@ def generate_html():
     </head>
     <body>
         <h1>Kraken Book Paper Trading</h1>
-        <p>Balance: {balance:.2f} USD | Inventory: {inventory:.4f} BTC | Realized PnL: {realized_pnl:.2f}</p>
+        <p>Balance: {balance:.2f} USD | Inventory: {inventory:.4f} BTC | Realized PnL: {realized_pnl:.2f} | Unrealized PnL: {unrealized_pnl:.2f}</p>
         <p>Best Bid: {best_bid} | Best Ask: {best_ask} | Mid: {mid:.2f} | Total Trades: {total_trades}</p>
         <h2>Trade History (Last {TRADE_HISTORY_LIMIT})</h2>
         <table>
@@ -201,7 +269,6 @@ async def ws_loop():
 
                 best_bid = next(iter(bid_levels))
                 best_ask = next(iter(ask_levels))
-
                 check_book_and_trade()
                 generate_html()
             except Exception as e:
