@@ -37,6 +37,7 @@ balance = INITIAL_BALANCE
 inventory = 0.0
 realized_pnl = 0.0
 trade_history = deque(maxlen=TRADE_HISTORY_LIMIT)
+total_trades = 0
 
 bid_levels = {}
 ask_levels = {}
@@ -58,8 +59,10 @@ def orderbook_imbalance():
     return (bid_vol - ask_vol) / (bid_vol + ask_vol)
 
 def execute_order(side, price, qty):
-    global balance, inventory, realized_pnl, trade_history
+    """Executa a ordem e registra entry e exit price"""
+    global balance, inventory, realized_pnl, trade_history, total_trades
     now = datetime.now(timezone.utc).isoformat()
+    total_trades += 1
 
     if side == "BUY":
         cost = qty * price
@@ -82,19 +85,25 @@ def execute_order(side, price, qty):
         pnl = proceeds - fee
         realized_pnl += pnl
 
-        # Atualiza último BUY
+        # Atualiza último BUY se existir para registrar exit_price
+        updated = False
         for t in reversed(trade_history):
             if t["side"] == "BUY" and t["exit_price"] is None:
                 t["exit_price"] = price
                 t["pnl"] = pnl
+                updated = True
                 break
+        if not updated:
+            # Nenhum PnL registrado, aplica perda simulada (ex: 0.1% do balance)
+            loss = balance * 0.001
+            balance -= loss
 
         trade_history.append({
             "side": "SELL",
             "entry_price": None,
             "exit_price": price,
             "qty": qty,
-            "pnl": pnl,
+            "pnl": pnl if updated else -loss,
             "time": now
         })
 
@@ -123,7 +132,7 @@ def generate_html():
     <body>
         <h1>Kraken Book Paper Trading</h1>
         <p>Balance: {balance:.2f} USD | Inventory: {inventory:.4f} BTC | Realized PnL: {realized_pnl:.2f}</p>
-        <p>Best Bid: {best_bid} | Best Ask: {best_ask} | Mid: {mid:.2f}</p>
+        <p>Best Bid: {best_bid} | Best Ask: {best_ask} | Mid: {mid:.2f} | Total Trades: {total_trades}</p>
         <h2>Trade History (Last {TRADE_HISTORY_LIMIT})</h2>
         <table>
             <tr><th>Time</th><th>Side</th><th>Entry Price</th><th>Exit Price</th><th>Qty</th><th>PnL</th></tr>
