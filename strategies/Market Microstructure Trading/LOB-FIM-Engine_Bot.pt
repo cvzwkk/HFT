@@ -1,0 +1,210 @@
+# pip install blessed
+import asyncio
+import json
+import time
+import collections
+import sys
+from blessed import Terminal
+from websockets import connect
+
+# --- Configuração ---
+SYMBOL = "tBTCUSD"
+USD_BALANCE = 10000.0
+BTC_BALANCE = 0.1
+ORDER_SIZE = 0.01  
+LATENCY_SIM = 0.05 
+RISK_THRESHOLD = 0.01
+QUEUE_TIMEOUT = 10.0  # Tempo máximo para a ordem ficar na fila (segundos)
+TERM = Terminal()
+
+class HFTPaperTrader:
+    def __init__(self):
+        self.usd = USD_BALANCE
+        self.btc = BTC_BALANCE
+        self.inventory = 0.0 
+        self.entry_price = 0.0
+        self.entry_time = 0.0
+        self.start_time = time.time()
+        self.total_trades = 0
+        self.trades = collections.deque(maxlen=7)
+        self.book = {'bids': {}, 'asks': {}}
+        self.status_msg = "SISTEMA INICIADO"
+        self.pending_order = None # {'side', 'price', 'vol_ahead', 'placed_at'}
+        self.last_draw = 0
+
+    def get_market_state(self):
+        if not self.book['bids'] or not self.book['asks']: return None
+        bids = sorted(self.book['bids'].items(), reverse=True)
+        asks = sorted(self.book['asks'].items())
+        best_bid, v_bid = bids[0]
+        best_ask, v_ask = asks[0]
+        mid = (best_bid + best_ask) / 2
+        imb = (v_bid - abs(v_ask)) / (v_bid + abs(v_ask))
+        return {'mid': mid, 'bid': best_bid, 'ask': best_ask, 'imb': imb, 'v_bid': v_bid, 'v_ask': abs(v_ask)}
+
+    async def execution_engine(self):
+        """Monitora a fila e aplica o Timeout de 5 segundos"""
+        while True:
+            m = self.get_market_state()
+            if not m or not self.pending_order:
+                await asyncio.sleep(0.01); continue
+
+            order = self.pending_order
+            agora = time.time()
+            tempo_em_fila = agora - order['placed_at']
+
+            # --- LÓGICA DE TIMEOUT (NOVO) ---
+            if tempo_em_fila > QUEUE_TIMEOUT:
+                self.status_msg = f"TIMEOUT: Limpando fila ({QUEUE_TIMEOUT}s)"
+                self.pending_order = None
+                continue
+
+            # Verificação de Saldo
+            if order['side'] == 'BUY' and self.usd < (order['price'] * ORDER_SIZE):
+                self.status_msg = "CANCEL: USD INSUFICIENTE"
+                self.pending_order = None; continue
+            
+            if order['side'] == 'SELL' and self.btc < ORDER_SIZE:
+                self.status_msg = "CANCEL: BTC INSUFICIENTE"
+                self.pending_order = None; continue
+
+            # Simulação de Fila
+            if order['side'] == 'BUY':
+                if m['bid'] <= order['price']:
+                    order['vol_ahead'] -= (m['v_bid'] * 0.2) # Mercado consumindo a fila
+                    if order['vol_ahead'] <= 0: self.fill_order(order['price'], "LONG")
+                else: self.status_msg = f"FILA: Ordem à frente ({tempo_em_fila:.1f}s)"
+            
+            elif order['side'] == 'SELL':
+                if m['ask'] >= order['price']:
+                    order['vol_ahead'] -= (m['v_ask'] * 0.2)
+                    if order['vol_ahead'] <= 0: self.fill_order(order['price'], "SHORT")
+                else: self.status_msg = f"FILA: Ordem à frente ({tempo_em_fila:.1f}s)"
+
+            await asyncio.sleep(0.1)
+
+    def fill_order(self, price, side_label):
+        cost = price * ORDER_SIZE
+        if side_label == "LONG":
+            self.usd -= cost
+            self.btc += ORDER_SIZE
+            self.inventory = ORDER_SIZE
+        else:
+            self.usd += cost
+            self.btc -= ORDER_SIZE
+            self.inventory = -ORDER_SIZE
+            
+        self.entry_price = price
+        self.entry_time = time.time()
+        self.status_msg = f"EXECUTADO: {side_label}"
+        self.pending_order = None
+
+    async def logic_loop(self):
+        while True:
+            m = self.get_market_state()
+            # Só busca novo sinal se não estiver posicionado e não tiver ordem na fila
+            if not m or self.inventory != 0 or self.pending_order:
+                await asyncio.sleep(0.01); continue
+
+            if abs(m['imb']) > 0.88:
+                await asyncio.sleep(LATENCY_SIM)
+                side = 'BUY' if m['imb'] > 0 else 'SELL'
+                target_price = m['bid'] if side == 'BUY' else m['ask']
+                
+                # Registra o momento em que a ordem entrou na fila
+                self.pending_order = {
+                    'side': side, 
+                    'price': target_price, 
+                    'vol_ahead': m['v_bid'] if side == 'BUY' else m['v_ask'],
+                    'placed_at': time.time()
+                }
+                self.status_msg = f"NOVA OFERTA: {side}"
+            
+            await asyncio.sleep(0.01)
+
+    async def risk_controller(self):
+        while True:
+            m = self.get_market_state()
+            if self.inventory != 0 and m:
+                exit_p = m['bid'] if self.inventory > 0 else m['ask']
+                pnl = (exit_p - self.entry_price) * self.inventory
+                if pnl >= RISK_THRESHOLD or pnl <= -RISK_THRESHOLD:
+                    self.close_position(exit_p, pnl)
+            await asyncio.sleep(0.01)
+
+    def close_position(self, price, pnl):
+        duration = time.time() - self.entry_time
+        cost = abs(self.inventory * price)
+        if self.inventory > 0:
+            self.usd += cost
+            self.btc -= abs(self.inventory)
+        else:
+            self.usd -= cost
+            self.btc += abs(self.inventory)
+
+        self.total_trades += 1
+        self.trades.appendleft({"time": time.strftime("%H:%M:%S"), "pnl": pnl, "dur": f"{duration:.1f}s"})
+        self.inventory = 0.0
+        self.status_msg = "ZERA: " + ("LUCRO" if pnl > 0 else "STOP")
+
+    def draw_ui(self):
+        now = time.time()
+        if now - self.last_draw < 0.05: return
+        self.last_draw = now
+        m = self.get_market_state()
+        if not m: return
+
+        uptime = time.strftime("%H:%M:%S", time.gmtime(now - self.start_time))
+        
+        buffer = TERM.home + TERM.bold_black_on_cyan(f" HFT ENGINE | TIMEOUT: 5s | UP: {uptime} ".center(TERM.width)) + "\n"
+        buffer += f"\n {TERM.bold('USD:')} ${self.usd:,.2f} | {TERM.bold('BTC:')} {self.btc:.6f} {TERM.clear_eol}\n"
+        
+        if self.pending_order:
+            q = self.pending_order
+            t_fila = now - q['placed_at']
+            buffer += f" {TERM.bold('FILA:')} {q['side']} @ {q['price']} | {TERM.yellow(f'{t_fila:.1f}s/5s')} | Vol: {q['vol_ahead']:.2f}{TERM.clear_eol}\n"
+        else:
+            buffer += f" {TERM.bold('POS:')}  {self.inventory:.4f} BTC @ {self.entry_price:,.2f}{TERM.clear_eol}\n"
+
+        fill = int((m['imb'] + 1) / 2 * 10)
+        bar = TERM.red('█' * (10 - fill)) + TERM.green('█' * fill)
+        buffer += f" {TERM.bold('IMB:')}  [{bar}] {m['imb']:+.2f} | P: {m['mid']:,.2f}{TERM.clear_eol}\n"
+        buffer += f" {TERM.bold('LOG:')}  {TERM.cyan(self.status_msg)}{TERM.clear_eol}\n"
+        
+        buffer += "\n " + TERM.underline("HISTÓRICO RECENTE") + f" {TERM.clear_eol}\n"
+        for t in list(self.trades):
+            c = TERM.green if t['pnl'] > 0 else TERM.red
+            buffer += f" {t['time']} | {c(f'${t['pnl']:+.2f}')} | {t['dur']} {TERM.clear_eol}\n"
+
+        sys.stdout.write(buffer); sys.stdout.flush()
+
+    async def socket_handler(self):
+        uri = "wss://api-pub.bitfinex.com/ws/2"
+        async with connect(uri) as ws:
+            await ws.send(json.dumps({"event": "subscribe", "channel": "book", "symbol": SYMBOL, "prec": "P0"}))
+            while True:
+                msg = await ws.recv()
+                data = json.loads(msg)
+                if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list):
+                    update = data[1]
+                    if isinstance(update[0], list):
+                        for e in update: self.update_book(e)
+                    else: self.update_book(update)
+                self.draw_ui()
+
+    def update_book(self, e):
+        if len(e) < 3: return
+        p, c, a = e
+        s = 'bids' if a > 0 else 'asks'
+        if c > 0: self.book[s][p] = a
+        else: self.book[s].pop(p, None)
+
+async def main():
+    bot = HFTPaperTrader()
+    with TERM.fullscreen(), TERM.hidden_cursor():
+        sys.stdout.write(TERM.clear)
+        await asyncio.gather(bot.socket_handler(), bot.logic_loop(), bot.risk_controller(), bot.execution_engine())
+
+if __name__ == "__main__":
+    try: asyncio.run(main())
+    except KeyboardInterrupt: pass
